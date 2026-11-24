@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 
 from . import preprocess, stitch
+from music21 import bar
+
 from .merge import export, merge
 from .recognize import AudiverisEngine, HomrEngine, pack_pages
 
@@ -45,6 +47,8 @@ class Result:
     fixes: list[str] = field(default_factory=list)
     engines: dict = field(default_factory=dict)
     seconds: float = 0.0
+    review_dir: str | None = None
+    midi_repeats_played: bool = False
 
     def to_dict(self) -> dict:
         return {"ok": True, **asdict(self)}
@@ -81,9 +85,43 @@ def read_title(page: preprocess.Page) -> str | None:
     return best
 
 
+def write_review(suspects, systems, review_dir: Path) -> Path:
+    """One image per system that holds a suspect measure, captioned so a
+    reviewer (person or agent) can find the measure and compare readings."""
+    from PIL import Image, ImageDraw, ImageFont
+    review_dir.mkdir(parents=True, exist_ok=True)
+    for old in review_dir.glob("system*.png"):
+        old.unlink()
+    by_sys: dict[int, list] = {}
+    for s in suspects:
+        if s.system is not None:
+            by_sys.setdefault(s.system, []).append(s)
+    try:
+        font = ImageFont.truetype("arial.ttf", 22)
+    except OSError:
+        font = ImageFont.load_default()
+    for k, items in by_sys.items():
+        img = systems[k - 1].image.convert("RGB")
+        lines = [f"System {k} ({items[0].of} measures)"] + [
+            f"measure {s.measure} = {s.position} of {s.of} in this system"
+            + (f", printed number {s.printed_measure}" if s.printed_measure else "") + f": {s.reason}"
+            for s in items]
+        head = 16 + 30 * len(lines)
+        out = Image.new("RGB", (img.width, img.height + head), "white")
+        d = ImageDraw.Draw(out)
+        for n, line in enumerate(lines):
+            d.text((12, 8 + 30 * n), line, fill=(180, 0, 0) if n else (0, 0, 0), font=font)
+        out.paste(img, (0, head))
+        path = review_dir / f"system{k:02d}.png"
+        out.save(path)
+        for s in items:
+            s.image = str(path.resolve())
+    return review_dir
+
+
 def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path("."),
                use_audiveris: bool = True, gpu: bool | None = None,
-               workdir: Path | None = None, log=lambda msg: None) -> Result:
+               workdir: Path | None = None, review: bool = True, log=lambda msg: None) -> Result:
     t0 = time.time()
     logging.getLogger("RapidOCR").setLevel(logging.ERROR)
     missing = [str(p) for p in images if not Path(p).is_file()]
@@ -151,7 +189,13 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
         warnings += mr.warnings
         if mr.measures == 0:
             raise TranscribeError(EXIT_RECOGNITION_FAILED, "no measures recognized")
-        xml, mid = export(mr.score, Path(out_dir), name)
+        xml, mid, expanded = export(mr.score, Path(out_dir), name)
+        has_repeats = any(isinstance(b, bar.Repeat) for m in mr.score.parts[0].getElementsByClass("Measure")
+                          for b in (m.leftBarline, m.rightBarline))
+        if has_repeats and not expanded:
+            warnings.append("could not expand the repeats; the MIDI plays the music as written once")
+        review_dir = (write_review(mr.suspects, st.systems, Path(out_dir) / f"{name}.review")
+                      if review and mr.suspects else None)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -160,7 +204,9 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
         name=name, musicxml=str(xml.resolve()), midi=str(mid.resolve()),
         measures=mr.measures, systems=len(st.systems), screenshots=len(images),
         duplicates_skipped=st.dropped,
-        suspect_measures=[{"measure": s.measure, "reason": s.reason} for s in mr.suspects],
+        suspect_measures=[{k: v for k, v in asdict(s).items() if v not in (None, [])} for s in mr.suspects],
+        review_dir=str(review_dir.resolve()) if review_dir else None,
+        midi_repeats_played=bool(has_repeats and expanded),
         warnings=warnings, fixes=mr.fixes,
         engines={"homr": {"gpu": bool(getattr(homr, "using_gpu", False))},
                  "audiveris": {"used": aud_out is not None}},

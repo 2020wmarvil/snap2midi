@@ -14,7 +14,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from music21 import clef, converter, instrument, key, layout, meter, stream
+from music21 import bar, clef, converter, instrument, key, layout, meter, spanner, stream
 
 warnings.filterwarnings("ignore", module="music21")
 
@@ -30,12 +30,22 @@ class Measure:
 class Piece:
     measures: list[Measure]
     title: str = ""
+    endings: int = 0  # 1st/2nd-ending brackets the engine reported
 
 
 @dataclass
 class Suspect:
-    measure: int
+    measure: int                     # 1-based, as in the output file
     reason: str
+    system: int | None = None        # 1-based system in reading order (matches review image)
+    position: int | None = None      # measure's position within that system
+    of: int | None = None            # measures in that system
+    printed_measure: int | None = None  # number as printed on the score, if known
+    homr: dict | None = None         # reading used in the output, per staff
+    audiveris: dict | None = None    # the cross-check engine's reading
+    only_homr: list[str] = field(default_factory=list)
+    only_audiveris: list[str] = field(default_factory=list)
+    image: str | None = None         # review image of the system (set by the pipeline)
 
 
 @dataclass
@@ -51,7 +61,7 @@ class MergeResult:
 
 def load_pages(paths: list[Path | None], page_systems: list[list[int]]) -> tuple[Piece, list[str]]:
     """Concatenate one engine's page outputs into a list of two-staff measures."""
-    out, warns = [], []
+    out, warns, endings = [], [], 0
     for p, (path, systems) in enumerate(zip(paths, page_systems)):
         if path is None:
             warns.append(f"page {p + 1}: no output")
@@ -61,6 +71,7 @@ def load_pages(paths: list[Path | None], page_systems: list[list[int]]) -> tuple
         except Exception as e:  # noqa: BLE001
             warns.append(f"page {p + 1}: unreadable output ({e})")
             continue
+        endings += len(list(s.recurse().getElementsByClass(spanner.RepeatBracket)))
         parts = list(s.parts)
         if len(parts) < 2:
             warns.append(f"page {p + 1}: expected 2 staves, got {len(parts)}")
@@ -74,7 +85,7 @@ def load_pages(paths: list[Path | None], page_systems: list[list[int]]) -> tuple
             out.append(Measure([ms[0][i], ms[1][i]], systems[min(sys_i, len(systems) - 1)], i == 0))
         if sys_i + 1 != len(systems):
             warns.append(f"page {p + 1}: engine saw {sys_i + 1} systems, expected {len(systems)}")
-    return Piece(out), warns
+    return Piece(out, endings=endings), warns
 
 
 # ---------------------------------------------------------------- comparison
@@ -197,6 +208,28 @@ def _staff_events(m: Measure, s: int) -> Counter:
 
 # ---------------------------------------------------------------- assembly
 
+def copy_repeats(primary: Piece, other: Piece, pairs) -> int:
+    """Repeat barlines come from Audiveris, which reads them reliably; homr
+    marks at most one per page and loses start repeats with its empty measures."""
+    for m in primary.measures:
+        for st in m.staves:
+            for side in ("leftBarline", "rightBarline"):
+                if isinstance(getattr(st, side), bar.Repeat):
+                    setattr(st, side, None)
+    n = 0
+    for i, j in pairs:
+        if i is None or j is None:
+            continue
+        src = other.measures[j].staves[0]
+        for side in ("leftBarline", "rightBarline"):
+            b = getattr(src, side)
+            if isinstance(b, bar.Repeat):
+                for st in primary.measures[i].staves:
+                    setattr(st, side, bar.Repeat(direction=b.direction, times=b.times))
+                n += 1
+    return n
+
+
 def build_score(piece: Piece, title: str) -> stream.Score:
     sc = stream.Score()
     parts = [stream.PartStaff(id="P1-Staff1"), stream.PartStaff(id="P1-Staff2")]
@@ -312,6 +345,9 @@ def merge(homr_out: list[Path | None], aud_out: list[Path | None] | None,
             primary.measures = keep
             pairs = align(primary.measures, other.measures)
         fixes += fix_octaves(primary, other, pairs)
+        if copy_repeats(primary, other, pairs) and other.endings:
+            warns.append("the score has repeats and possibly 1st/2nd endings; endings are not "
+                         "handled, so the MIDI may play both endings on every pass")
         for i, j in pairs:
             if i is None:
                 continue
@@ -339,17 +375,81 @@ def merge(homr_out: list[Path | None], aud_out: list[Path | None] | None,
                     by_measure.setdefault(m_i, Suspect(m_i, "note outside the piano range"))
     warns += number_gaps(primary, printed)
 
+    matched = {i: j for i, j in pairs if i is not None and j is not None} if aud_out is not None else {}
+    final = sorted(by_measure.values(), key=lambda s: s.measure)
+    for s in final:
+        _describe(s, primary, other if aud_out is not None else None, matched.get(s.measure - 1), printed)
+
     score = build_score(primary, title)
-    return MergeResult(score, len(primary.measures), sorted(by_measure.values(), key=lambda s: s.measure),
-                       warns, fixes)
+    return MergeResult(score, len(primary.measures), final, warns, fixes)
 
 
-def export(score: stream.Score, out_dir: Path, name: str) -> tuple[Path, Path]:
+# ---------------------------------------------------------------- review detail
+
+def _reading(m: Measure) -> dict[str, str]:
+    """What an engine read, per staff, as 'beat N: pitches' (beats in quarter notes)."""
+    out = {}
+    for name, st in zip(("treble", "bass"), m.staves):
+        beats: dict[float, list[str]] = {}
+        for n in st.recurse().notes:
+            if n.duration.isGrace:
+                continue
+            off = round(float(n.getOffsetInHierarchy(st)) * 4) / 4
+            beats.setdefault(off, []).extend(
+                f"{p.nameWithOctave}({n.duration.type})" for p in n.pitches)
+        out[name] = "; ".join(f"beat {o + 1:g}: {' '.join(ps)}" for o, ps in sorted(beats.items())) or "rest"
+    return out
+
+
+def _names(m: Measure) -> dict[tuple[float, int], str]:
+    """(onset, midi) -> the pitch as the engine spelled it."""
+    out = {}
+    for st in m.staves:
+        for n in st.recurse().notes:
+            off = round(float(n.getOffsetInHierarchy(st)) * 4) / 4
+            for p in n.pitches:
+                out.setdefault((off, p.midi), p.nameWithOctave)
+    return out
+
+
+def _diff(a: Counter, b: Counter, names: dict) -> list[str]:
+    from music21 import pitch
+    return [f"beat {o + 1:g} {names.get((o, p)) or pitch.Pitch(midi=p).nameWithOctave}"
+            + (f" x{c}" if c > 1 else "") for (o, p), c in sorted((a - b).items())]
+
+
+def _describe(s: Suspect, primary: Piece, other: Piece | None, j: int | None,
+              printed: list[int | None]) -> None:
+    """Attach everything a reviewer needs to check one suspect measure."""
+    i = s.measure - 1
+    m = primary.measures[i]
+    same_sys = [k for k, x in enumerate(primary.measures) if x.system == m.system]
+    s.system = m.system + 1
+    s.position = same_sys.index(i) + 1
+    s.of = len(same_sys)
+    start = printed[m.system] if m.system < len(printed) else None
+    s.printed_measure = start + s.position - 1 if start is not None else None
+    s.homr = _reading(m)
+    if other is not None and j is not None:
+        s.audiveris = _reading(other.measures[j])
+        eh, ea = events(m), events(other.measures[j])
+        s.only_homr = _diff(eh, ea, _names(m))
+        s.only_audiveris = _diff(ea, eh, _names(other.measures[j]))
+
+
+def export(score: stream.Score, out_dir: Path, name: str) -> tuple[Path, Path, bool]:
     out_dir.mkdir(parents=True, exist_ok=True)
     xml = out_dir / f"{name}.musicxml"
     mid = out_dir / f"{name}.mid"
     # The engines' output is already notated; music21's re-notation pass would
     # re-bar measures and can crash on multi-voice measures.
     score.write("musicxml", fp=str(xml), makeNotation=False)
-    score.write("midi", fp=str(mid))  # one track per staff, so the hands stay separable
-    return xml, mid
+    # MIDI is what gets played along to, so repeats are played out; the
+    # MusicXML keeps the score as printed. One track per staff (hand).
+    expanded = True
+    try:
+        played = score.expandRepeats()
+    except Exception:  # noqa: BLE001  malformed repeat structure: play as written
+        played, expanded = score, False
+    played.write("midi", fp=str(mid))
+    return xml, mid, expanded
