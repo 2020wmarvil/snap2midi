@@ -1,0 +1,24 @@
+[project]
+name = "snap2midi"
+version = "0.1.0"
+description = "Turn screenshots of piano sheet music into MusicXML and MIDI"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "homr==0.7.1",
+    "music21>=10",
+    "numpy",
+    "opencv-python-headless",
+    "pillow",
+    "rapidocr",
+    "onnxruntime-gpu[cuda,cudnn]==1.32.0",
+]
+
+[project.scripts]
+snap2midi = "snap2midi.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

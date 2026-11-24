@@ -1,0 +1,9 @@
+.venv/
+.venv-oemer/
+scratch/
+bench_out/
+bench_out_*.log
+testdata/
+__pycache__/
+*.pyc
+*.egg-info/
