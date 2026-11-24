@@ -62,12 +62,38 @@ class Engine:
         raise NotImplementedError
 
 
+def cuda_gpu_count() -> int:
+    """Number of usable NVIDIA GPUs, asked from the CUDA runtime itself.
+
+    onnxruntime-gpu always lists the CUDA provider, even with no NVIDIA card or
+    driver, so the provider list alone cannot decide between GPU and CPU.
+    """
+    import ctypes
+    import onnxruntime as ort
+    with contextlib.suppress(Exception):
+        ort.preload_dlls()  # CUDA/cuDNN from the nvidia wheels next to onnxruntime
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        return 0
+    for name in ("cudart64_13.dll", "cudart64_12.dll"):
+        try:
+            lib = ctypes.WinDLL(name) if os.name == "nt" else ctypes.CDLL(name)
+        except OSError:
+            continue
+        n = ctypes.c_int(0)
+        if lib.cudaGetDeviceCount(ctypes.byref(n)) == 0:
+            return n.value
+        return 0
+    return 0
+
+
 class HomrEngine(Engine):
     name = "homr"
 
     def __init__(self, gpu: bool | None = None):
         self.gpu = gpu
         self._ready = False
+        self.using_gpu = False
+        self.gpu_failed = False
 
     def available(self) -> bool:
         try:
@@ -76,17 +102,14 @@ class HomrEngine(Engine):
         except ImportError:
             return False
 
-    def _setup(self):
-        if self._ready:
-            return
+    def _setup(self, use_gpu: bool | None = None):
         import onnxruntime as ort
-        with contextlib.suppress(Exception):
-            ort.preload_dlls()  # CUDA/cuDNN from the bundled nvidia packages
         ort.set_default_logger_severity(3)
         from homr.main import ProcessingConfig, download_weights
         from homr.music_xml_generator import XmlGeneratorArguments
-        cuda = "CUDAExecutionProvider" in ort.get_available_providers()
-        use_gpu = cuda if self.gpu is None else (self.gpu and cuda)
+        if use_gpu is None:
+            use_gpu = cuda_gpu_count() > 0 if self.gpu is None else (self.gpu and cuda_gpu_count() > 0)
+        # The installer downloads the models; this only downloads when running from a fresh checkout.
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             download_weights(use_gpu, use_gpu, False)
         self.config = ProcessingConfig(False, False, False, False, -1, use_gpu, use_gpu, False, False)
@@ -94,19 +117,32 @@ class HomrEngine(Engine):
         self.using_gpu = use_gpu
         self._ready = True
 
-    def recognize(self, images, outdir):
-        self._setup()
+    def _run(self, local: Path) -> Path:
         from homr.main import process_image
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return Path(process_image(str(local), self.config, self.xml_args))
+
+    def recognize(self, images, outdir):
+        if not self._ready:
+            self._setup()
         outdir.mkdir(parents=True, exist_ok=True)
         results = []
         for img in images:
             local = outdir / img.name
             shutil.copy2(img, local)
             try:
-                with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-                    results.append(Path(process_image(str(local), self.config, self.xml_args)))
+                results.append(self._run(local))
             except Exception:
-                results.append(None)
+                if not self.using_gpu:
+                    results.append(None)
+                    continue
+                # A GPU that is present but unusable (driver, memory): finish on the CPU.
+                self._setup(use_gpu=False)
+                self.gpu_failed = True
+                try:
+                    results.append(self._run(local))
+                except Exception:
+                    results.append(None)
         return results
 
 

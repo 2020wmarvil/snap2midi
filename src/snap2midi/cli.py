@@ -17,6 +17,22 @@ def _quiet() -> None:
     os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
 
 
+def _claim_stdout():
+    """In --json mode stdout must carry exactly one JSON object. Libraries print
+    to stdout (onnxruntime reports missing CUDA DLLs there, some from native
+    code), so for the run's duration file descriptor 1 is pointed at stderr and
+    the JSON is written to a private copy of the original stdout."""
+    sys.stdout.flush()
+    real = os.fdopen(os.dup(1), "w", encoding="utf-8")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+
+    def emit(obj: dict) -> None:
+        real.write(json.dumps(obj, indent=2) + "\n")
+        real.flush()
+    return emit
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="snap2midi",
                                  description="Turn screenshots of piano sheet music into MusicXML and MIDI.")
@@ -36,26 +52,27 @@ def main(argv: list[str] | None = None) -> int:
     from .pipeline import EXIT_OK, TranscribeError, transcribe
 
     log = (lambda m: None) if a.json else (lambda m: print(m, file=sys.stderr, flush=True))
+    emit = _claim_stdout() if a.json else None
     try:
         r = transcribe(a.images, name=a.name, out_dir=a.out_dir, use_audiveris=not a.no_crosscheck,
                        gpu=False if a.cpu else None, workdir=a.keep_work, review=not a.no_review, log=log)
     except TranscribeError as e:
         if a.json:
-            print(json.dumps({"ok": False, "exit_code": e.code, "error": str(e)}))
+            emit({"ok": False, "exit_code": e.code, "error": str(e)})
         else:
             print(f"error: {e}", file=sys.stderr)
         return e.code
     except Exception as e:  # noqa: BLE001  unexpected: still answer in the promised format
         msg = f"internal error: {type(e).__name__}: {e}"
         if a.json:
-            print(json.dumps({"ok": False, "exit_code": 1, "error": msg}))
+            emit({"ok": False, "exit_code": 1, "error": msg})
         else:
             import traceback
             traceback.print_exc()
         return 1
 
     if a.json:
-        print(json.dumps(r.to_dict(), indent=2))
+        emit(r.to_dict())
         return EXIT_OK
     print(f"Wrote {r.musicxml}")
     print(f"Wrote {r.midi}")

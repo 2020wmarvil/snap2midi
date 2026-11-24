@@ -10,10 +10,12 @@ dependencies = [
     "opencv-python-headless",
     "pillow",
     "rapidocr",
-    "onnxruntime-gpu[cuda,cudnn]==1.32.0",
+    "onnxruntime-gpu==1.32.0",
 ]
 
 [project.optional-dependencies]
+# NVIDIA CUDA + cuDNN libraries (about 1.4 GB). Without them homr runs on the CPU.
+cuda = ["onnxruntime-gpu[cuda,cudnn]==1.32.0"]
 test = ["pytest"]
 
 [project.scripts]

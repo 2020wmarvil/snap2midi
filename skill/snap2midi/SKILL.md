@@ -14,6 +14,10 @@ Fully automatic: no prompts, no manual correction step.
 snap2midi transcribe <image> [<image> ...] [-n NAME] [-o OUT_DIR] --json
 ```
 
+In a Windows install this file sits next to the launcher: run `snap2midi.cmd` from the
+same folder as this SKILL.md (use its full path) in place of `snap2midi`, unless
+`snap2midi` is on PATH.
+
 - `<image>`: PNG or JPEG screenshots of a single piece, **in reading order**. Screenshots
   may be page by page or scrolled with overlap; overlap and exact duplicates are removed.
 - `-n, --name`: output file name. Omit it to use the title read from page 1
@@ -79,7 +83,7 @@ Failure: `{"ok": false, "exit_code": 3, "error": "no piano staves found in the s
 | 2 | Bad arguments or unreadable image | Fix the paths or file types |
 | 3 | No piano staves found | Images are not sheet music, or too small/blurry |
 | 4 | Recognition failed | Retry with `--cpu`; if it persists, report it |
-| 5 | Engine missing | The install is broken; reinstall the bundle |
+| 5 | Engine missing | The install is broken; rerun the installer with -Force |
 
 ## Review the work (always do this)
 
