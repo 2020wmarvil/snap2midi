@@ -43,6 +43,20 @@ class System:
     box: tuple[int, int, int, int]  # crop box in the original screenshot
     partial: bool = False     # touches the screenshot edge, may be cut off
     staves: list[Staff] = field(default_factory=list)
+    barlines: list[int] = field(default_factory=list)  # x in the screenshot, left to right
+
+    @property
+    def measure_count(self) -> int | None:
+        """Measures printed in this system, from its barlines (None if unclear)."""
+        return len(self.barlines) - 1 if len(self.barlines) >= 2 else None
+
+    def measure_span(self, position: int) -> tuple[int, int] | None:
+        """x-range of the position-th measure (1-based) inside self.image."""
+        if self.measure_count is None or not 1 <= position <= self.measure_count:
+            return None
+        scale = self.image.width / (self.box[2] - self.box[0])
+        a, b = self.barlines[position - 1], self.barlines[position]
+        return round((a - self.box[0]) * scale), round((b - self.box[0]) * scale)
 
 
 @dataclass
@@ -167,6 +181,45 @@ def pair_systems(staves: list[Staff]) -> tuple[list[tuple[Staff, Staff]], list[s
     return pairs, warnings
 
 
+def find_barlines(gray: np.ndarray, treble: Staff, bass: Staff) -> list[int]:
+    """x positions of the barlines of one grand staff, including the line that
+    opens the system. A piano barline runs unbroken from the top line of the
+    treble staff to the bottom line of the bass staff; stems and note heads do
+    not, so this needs no knowledge of the music.
+    Double and repeat barlines count once."""
+    dark = gray < 140
+    x0, x1 = min(treble.x0, bass.x0), max(treble.x1, bass.x1)
+    il = (treble.interline + bass.interline) / 2
+
+    def covered(st: Staff) -> np.ndarray:
+        band = dark[st.top:st.bottom + 1, x0:x1 + 1]
+        return band.mean(axis=0) >= 0.9
+
+    # Piano barlines also run through the gap between the staves; stems do not.
+    gap = dark[treble.bottom + 1:bass.top, x0:x1 + 1].mean(axis=0) >= 0.9
+    cols = np.where(covered(treble) & covered(bass) & gap)[0] + x0
+    lines: list[list[int]] = []
+    for c in cols:
+        if lines and c - lines[-1][-1] <= max(2, 0.8 * il):  # same (double/thick) barline
+            lines[-1].append(int(c))
+        else:
+            lines.append([int(c)])
+    xs = [round((l[0] + l[-1]) / 2) for l in lines]
+    thick = [l[-1] - l[0] + 1 >= 0.3 * il for l in lines]
+    # The system's opening line sits at the staff start; add it if it was not drawn.
+    if not xs or xs[0] - x0 > 1.5 * il:
+        xs.insert(0, x0)
+        thick.insert(0, False)
+    # A start-repeat sign right after the clef and key signature is where the
+    # first measure begins; the clef area before it is not a measure.
+    if len(xs) > 2 and thick[1] and xs[1] - xs[0] < 10 * il:
+        del xs[0], thick[0]
+    # The final barline sits at the staff end.
+    if x1 - xs[-1] > 1.5 * il:
+        xs.append(x1)
+    return xs
+
+
 def analyze(path: Path | str) -> Page:
     path = Path(path)
     rgb = np.asarray(Image.open(path).convert("RGB"))
@@ -196,7 +249,8 @@ def analyze(path: Path | str) -> Page:
         crop = Image.fromarray(gray[top:bot, x0:x1])
         scale = TARGET_INTERLINE / interline
         crop = crop.resize((round(crop.width * scale), round(crop.height * scale)), Image.LANCZOS)
-        systems.append(System(crop, path.name, k, (x0, top, x1, bot), partial, [a, b]))
+        systems.append(System(crop, path.name, k, (x0, top, x1, bot), partial, [a, b],
+                              find_barlines(gray, a, b)))
 
     title_band = None
     if pairs:

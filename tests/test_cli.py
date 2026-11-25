@@ -51,8 +51,10 @@ def test_end_to_end(tmp_path, testdata, piece):
     assert r["midi_repeats_played"] == base["repeats_played"]
     # More suspects than the baseline = the cross-check found new disagreements.
     assert len(r["suspect_measures"]) <= base["max_suspects"], r["suspect_measures"]
+    assert r["printed_last_measure"] == base["measures"]
     for s in r["suspect_measures"]:
         assert s["image"] and (tmp_path / f"{r['name']}.review").is_dir()
+        assert s.get("measure_image"), f"no zoomed crop for measure {s['measure']}"
 
     score = converter.parse(r["musicxml"])
     assert len(score.parts) == 2

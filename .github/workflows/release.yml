@@ -51,9 +51,15 @@ jobs:
       - name: Installed CLI answers in JSON
         shell: pwsh
         run: |
+          # The CLI is expected to fail here (missing file, exit code 2); do not let
+          # PowerShell treat that non-zero exit as a step failure.
+          $PSNativeCommandUseErrorActionPreference = $false
           $out = & cmd /c "$env:RUNNER_TEMP\snap2midi\snap2midi.cmd" transcribe nope.png --json
-          $r = $out | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 2 -or $r.ok -ne $false) { throw "unexpected CLI result: $out" }
+          $code = $LASTEXITCODE
+          $r = ($out -join "`n") | ConvertFrom-Json
+          if ($code -ne 2 -or $r.ok -ne $false) { throw "unexpected CLI result (exit $code): $out" }
+          Write-Host "CLI answered: exit $code, $($r.error)"
+          exit 0
 
       - name: Keep the package (manual runs)
         if: github.ref_type != 'tag'

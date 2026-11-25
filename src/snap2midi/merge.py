@@ -45,7 +45,8 @@ class Suspect:
     audiveris: dict | None = None    # the cross-check engine's reading
     only_homr: list[str] = field(default_factory=list)
     only_audiveris: list[str] = field(default_factory=list)
-    image: str | None = None         # review image of the system (set by the pipeline)
+    image: str | None = None         # review image of the whole system (set by the pipeline)
+    measure_image: str | None = None  # enlarged crop of just this measure, when barlines allow
 
 
 @dataclass
@@ -55,6 +56,7 @@ class MergeResult:
     suspects: list[Suspect] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     fixes: list[str] = field(default_factory=list)
+    system_counts: dict[int, int] = field(default_factory=dict)  # system index -> measures recognized
 
 
 # ---------------------------------------------------------------- loading
@@ -381,10 +383,20 @@ def merge(homr_out: list[Path | None], aud_out: list[Path | None] | None,
         _describe(s, primary, other if aud_out is not None else None, matched.get(s.measure - 1), printed)
 
     score = build_score(primary, title)
-    return MergeResult(score, len(primary.measures), final, warns, fixes)
+    counts = dict(Counter(m.system for m in primary.measures))
+    return MergeResult(score, len(primary.measures), final, warns, fixes, counts)
 
 
 # ---------------------------------------------------------------- review detail
+
+def _duration(n) -> str:
+    """'half', 'dotted half', 'quarter, tied' ... as a reader would say it."""
+    d = n.duration
+    text = ("dotted " * d.dots) + d.type
+    if n.tie is not None and n.tie.type in ("start", "continue"):
+        text += ", tied"
+    return text
+
 
 def _reading(m: Measure) -> dict[str, str]:
     """What an engine read, per staff, as 'beat N: pitches' (beats in quarter notes)."""
@@ -396,7 +408,7 @@ def _reading(m: Measure) -> dict[str, str]:
                 continue
             off = round(float(n.getOffsetInHierarchy(st)) * 4) / 4
             beats.setdefault(off, []).extend(
-                f"{p.nameWithOctave}({n.duration.type})" for p in n.pitches)
+                f"{p.nameWithOctave}({_duration(n)})" for p in n.pitches)
         out[name] = "; ".join(f"beat {o + 1:g}: {' '.join(ps)}" for o, ps in sorted(beats.items())) or "rest"
     return out
 

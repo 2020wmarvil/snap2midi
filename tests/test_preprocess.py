@@ -114,3 +114,28 @@ def test_staff_extent_survives_broken_lines():
     assert len(staves) == 2
     for st in staves:
         assert st.x0 <= 41 and st.x1 >= 858
+
+
+@pytest.mark.parametrize("piece", PIECES)
+def test_barlines_match_printed_measure_numbers(analyzed, piece):
+    """Measures per system from the barlines must equal the step between the
+    printed measure numbers of consecutive systems."""
+    systems = [s for page in analyzed[piece] for s in page.systems]
+    numbers = BASELINE[piece]["measure_numbers"]
+    for k in range(len(systems) - 1):
+        assert systems[k].measure_count == numbers[k + 1] - numbers[k], f"system {k + 1}"
+    # And the last system ends on the piece's last printed measure.
+    assert numbers[-1] + systems[-1].measure_count - 1 == BASELINE[piece]["measures"]
+
+
+def test_barlines_ignore_stems_and_find_measures():
+    from snap2midi.preprocess import Staff, find_barlines
+    img = _synthetic_grand_staff()
+    for x in (40, 300, 560, 859):           # opening line, 2 barlines, final line
+        img[150:405, x:x + 2] = 0
+    img[150:225, 420:422] = 0                # a treble stem: one staff only
+    img[330:405, 420:422] = 0                # a bass stem at the same x: gap stays white
+    treble = Staff([150 + 18 * k for k in range(5)], 40, 860)
+    bass = Staff([330 + 18 * k for k in range(5)], 40, 860)
+    xs = find_barlines(img, treble, bass)
+    assert len(xs) == 4 and abs(xs[1] - 301) <= 2 and abs(xs[2] - 561) <= 2

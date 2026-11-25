@@ -14,9 +14,10 @@ Fully automatic: no prompts, no manual correction step.
 snap2midi transcribe <image> [<image> ...] [-n NAME] [-o OUT_DIR] --json
 ```
 
-In a Windows install this file sits next to the launcher: run `snap2midi.cmd` from the
-same folder as this SKILL.md (use its full path) in place of `snap2midi`, unless
-`snap2midi` is on PATH.
+Where the command lives: in a Windows install this file sits next to the launcher, so run
+`snap2midi.cmd` from the same folder as this SKILL.md (use its full path) in place of
+`snap2midi`. If `snap2midi` is on PATH, that works too. If neither exists, ask the user where
+snap2midi is installed; do not guess.
 
 - `<image>`: PNG or JPEG screenshots of a single piece, **in reading order**. Screenshots
   may be page by page or scrolled with overlap; overlap and exact duplicates are removed.
@@ -32,45 +33,58 @@ same folder as this SKILL.md (use its full path) in place of `snap2midi`, unless
 One run = one piece. If the user hands you screenshots of several pieces, group them
 first (titles, page numbers, measure numbers) and run once per piece.
 
-Runtime: roughly 10 to 30 s per piece on an NVIDIA GPU, several times longer on CPU.
+Runtime: roughly 10 to 60 s per piece on an NVIDIA GPU, a few times longer on CPU.
 
 ## Output (`--json`)
 
-Success:
+Success (example from a short piece; your values will differ):
 
 ```json
 {
   "ok": true,
-  "name": "Je Te Laisserai Des Mots",
-  "musicxml": "C:\\...\\Je Te Laisserai Des Mots.musicxml",
-  "midi": "C:\\...\\Je Te Laisserai Des Mots.mid",
-  "measures": 92,
-  "systems": 23,
-  "screenshots": 5,
+  "name": "Hollow Knight Main Theme",
+  "musicxml": "C:\\...\\Hollow Knight Main Theme.musicxml",
+  "midi": "C:\\...\\Hollow Knight Main Theme.mid",
+  "measures": 26,
+  "printed_last_measure": 26,
+  "systems": 8,
+  "screenshots": 2,
   "duplicates_skipped": 0,
   "suspect_measures": [
     {
-      "measure": 31,
-      "reason": "engines disagree on 15% of notes",
-      "system": 9, "position": 1, "of": 4, "printed_measure": 31,
-      "homr": {"treble": "beat 1: A#4(eighth) A#3(eighth); ...", "bass": "beat 1: F#2(quarter); beat 2: F#3(quarter) C#3(quarter) A#2(quarter); ..."},
-      "audiveris": {"treble": "...", "bass": "beat 1: F#2(quarter); beat 2: A2(quarter) C#3(quarter) F#3(quarter) ..."},
-      "only_homr": ["beat 2 A#2", "beat 3 A#2"],
-      "only_audiveris": ["beat 2 A2 x2", "beat 2 C#3", "beat 3 A2"],
-      "image": "C:\\...\\Je Te Laisserai Des Mots.review\\system09.png"
+      "measure": 23,
+      "reason": "engines disagree on 22% of notes",
+      "system": 7, "position": 3, "of": 3, "printed_measure": 23,
+      "homr": {"treble": "beat 1: C5(half); beat 3.25: D5(eighth); beat 3.75: E-5(eighth)", "bass": "beat 1: C3(eighth); ..."},
+      "audiveris": {"treble": "beat 1: C5(half); beat 3.5: D5(eighth); beat 4: E-5(eighth)", "bass": "beat 1: C3(eighth); ..."},
+      "only_homr": ["beat 3.25 D5", "beat 3.75 E-5"],
+      "only_audiveris": ["beat 3.5 D5", "beat 4 E-5"],
+      "image": "C:\\...\\Hollow Knight Main Theme.review\\system07.png",
+      "measure_image": "C:\\...\\Hollow Knight Main Theme.review\\system07_measure023.png"
     }
   ],
-  "review_dir": "C:\\...\\Je Te Laisserai Des Mots.review",
-  "midi_repeats_played": true,
+  "review_dir": "C:\\...\\Hollow Knight Main Theme.review",
+  "midi_repeats_played": false,
   "warnings": [],
-  "fixes": ["dropped 2 empty measure(s) only homr produced (repeat barlines)"],
+  "fixes": ["system 1, treble staff shifted up an octave (octave clef)"],
   "engines": {"homr": {"gpu": true}, "audiveris": {"used": true}},
-  "seconds": 55.3
+  "seconds": 11.1
 }
 ```
 
-Beats count quarter notes from 1 (`beat 2.5` = the eighth after beat 2). `homr` is the reading
-written to the output files; `audiveris` is the second engine's reading of the same measure.
+How to read a suspect measure:
+- `homr` is the reading **written to the output files**. `audiveris` is the second engine's
+  reading of the same measure, used only for checking.
+- Beats count quarter notes from 1 (`beat 2.5` = the eighth after beat 2). Durations are
+  spelled out with dots and ties: `half`, `dotted half`, `quarter, tied` (tied into the
+  next measure).
+- `only_homr` / `only_audiveris`: notes one engine has and the other lacks, by beat.
+  `x2` means that engine has the note twice at that beat (for example in two voices).
+- `measure`: position in the output file. `printed_measure`: the number on the user's
+  score. `position` / `of`: where the measure sits in its line of music.
+- `measure_image`: an enlarged crop of just that measure. `image`: the whole line of music
+  around it. `measure_image` is absent when the barlines could not be matched; then use
+  `image` and count measures from the left.
 
 Failure: `{"ok": false, "exit_code": 3, "error": "no piano staves found in the screenshots"}`
 
@@ -91,21 +105,25 @@ Two independent engines read the score. Where they agree the result is very like
 right; where they disagree, one of them is wrong, and only a look at the score settles it.
 There is no other ground truth. So after every successful run:
 
-1. **Glance over the whole result.** Does `measures` match the last printed measure
-   number on the score? Are there `warnings`? Many suspects packed into one system often
-   means that system was misread as a whole (wrong clef, missed key signature) rather
-   than note by note.
-2. **Check every suspect measure against its image.** Open `image` (one per system,
-   captioned with the measure's position in that system, e.g. "1 of 4"). Find the measure,
-   then compare `only_homr` and `only_audiveris` with what is printed: count ledger lines,
-   look for accidentals (including ones carried from earlier in the measure), and check
-   which notes are held across beats. Decide for each: **homr right**, **Audiveris
-   right**, or **unclear**.
-3. **Report to the user** in a short list: measure (use `printed_measure` when present,
+1. **Glance over the whole result.** Read `warnings` first. `measures` should equal
+   `printed_last_measure` (the score's own last measure number, read from the page); the
+   tool warns when they differ. Many suspects in one line of music usually mean that line
+   was misread as a whole (wrong clef, missed key signature), not note by note.
+2. **Check every suspect measure against its image.** Remember: the output files hold the
+   `homr` reading. Open `measure_image` (enlarged) and, for context, `image`. Compare
+   `only_homr` and `only_audiveris` with what is printed:
+   - count ledger lines above and below the staff;
+   - look for accidentals, including ones carried from earlier in the same measure, and
+     ones carried into this measure by a tie from the previous one;
+   - check which notes are held across beats (dots, ties) and where each note starts.
+   Decide for each: **homr right** (files are correct), **Audiveris right** (files are
+   wrong here), or **unclear**.
+3. **Report to the user** in a short list: the measure (use `printed_measure` when present,
    so it matches their score), the verdict, and the notes involved. Example:
-   "m. 31: homr right (the A in the bass chord is sharp, Audiveris missed it)."
-   Say plainly when the output file holds a wrong reading (the "Audiveris right" cases),
-   since the output uses homr. Do not edit the output files unless the user asks.
+   "m. 31: homr right (the A in the bass chord is sharp; Audiveris missed it)."
+   Say plainly which measures in the files are wrong (the "Audiveris right" and "unclear"
+   cases). If every suspect is "homr right", say that the files need no correction and
+   list the checks briefly. Do not edit the output files unless the user asks.
 4. If you cannot view images, say so and list the suspect measures with both readings
    for the user to check by eye or by ear.
 
@@ -122,12 +140,15 @@ Known tendencies, useful as a prior but never a substitute for looking:
 - `warnings` worth surfacing to the user:
   - `measures X-Y missing: a screenshot may be missing ...`: a gap in the printed measure
     numbers. Ask the user for the missing screenshot and rerun with it in order.
+  - `the score's last printed measure is N but M measures were recognized`: measures were
+    lost or added somewhere; the per-system warnings below usually say where.
+  - `system K: N measures recognized but the barlines show M`: that line of music needs
+    a look as a whole.
   - `measure numbers go backwards ...`: screenshots are probably out of order.
   - `... duplicate of previous screenshot, skipped`: harmless.
   - `Audiveris not found ...`: no cross-check was done, so `suspect_measures` only covers
     bar-length and range problems.
 - `fixes`: automatic corrections already applied. Informational.
-- `measures` vs. the last printed measure number on the score is a quick sanity check.
 
 ## Limits
 
