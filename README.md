@@ -54,3 +54,7 @@ without them those tests are skipped.
 The installer downloads, and snap2midi runs, third-party software under its own licenses,
 including Audiveris (AGPL-3.0), homr, music21 and NVIDIA's CUDA and cuDNN libraries. An
 install keeps their license texts in its `licenses` folder.
+
+## License
+
+snap2midi is MIT licensed (see [LICENSE](LICENSE)). The third-party software it installs keeps its own licenses.
