@@ -82,3 +82,21 @@ def make_scrolled(images: list[Path], out: Path, height: int = 1500, stride: int
         canvas.save(path, quality=92)
         shots.append(path)
     return shots
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Tear Qt down while Python is still fully alive. Leaving the QApplication
+    to be destroyed during interpreter shutdown can crash the process after all
+    tests passed (seen as exit code 1 on the CI runner)."""
+    import sys
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is not None:
+        for w in QApplication.topLevelWidgets():
+            w.close()
+            w.deleteLater()
+        app.processEvents()
+        if hasattr(app, "shutdown"):
+            app.shutdown()

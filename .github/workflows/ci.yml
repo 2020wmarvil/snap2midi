@@ -27,4 +27,9 @@ jobs:
       # in the public repo; they skip themselves. What runs here: merge logic,
       # synthetic preprocessing checks and the CLI contract (JSON, exit codes).
       - name: Fast tests
-        run: python -m pytest -q -rs
+        shell: pwsh
+        run: |
+          python -m pytest -q -rs
+          $code = $LASTEXITCODE
+          Write-Host "pytest exit code: $code"
+          exit $code
