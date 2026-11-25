@@ -1,10 +1,17 @@
 # snap2midi
 
-Turn phone screenshots of piano sheet music into MusicXML and MIDI on Windows.
+Turn phone screenshots of piano sheet music into MusicXML and MIDI on Windows, from a
+desktop app or the command line.
 
 ```
-snap2midi.cmd transcribe page1.png page2.png page3.png -o out --json
+snap2midi-gui.cmd                                         # the app
+snap2midi.cmd transcribe page1.png page2.png -o out --json   # the CLI
 ```
+
+The app: drop screenshots in, press Transcribe, and watch each step "bake": the cleaned
+screenshots with the detected staves and barlines, the stitched lines of music, both engines'
+progress page by page, then the engraved score with suspect measures outlined (click one to
+see what each engine read) and MIDI playback.
 
 - Screenshots may be page by page or scrolled with overlap; duplicates and overlap are removed.
 - Two optical music recognition engines read every page: [homr](https://github.com/liebharc/homr)
@@ -27,13 +34,15 @@ against SHA-256 hashes, into `%LOCALAPPDATA%\Programs\snap2midi`:
 | Component | Source | Size |
 | --- | --- | --- |
 | Python 3.11 runtime | python.org | ~10 MB |
-| Python packages and snap2midi | PyPI, the release | ~0.4 GB |
+| Python packages (incl. Qt for the app) and snap2midi | PyPI, the release | ~0.6 GB |
 | homr and OCR models | their release downloads | ~0.2 GB |
 | Audiveris (unpacked, not system-installed) | Audiveris GitHub release | ~0.2 GB |
 | NVIDIA CUDA and cuDNN, only with an NVIDIA GPU | PyPI | ~1.5 GB |
 
-About 0.9 GB without a GPU, 2.5 GB with one. Options: `install.cmd -Dir D:\snap2midi -Gpu no -Force`.
-Internet is needed to install, not to run.
+About 1.1 GB without a GPU, 2.7 GB with one. The installer adds a snap2midi entry to the
+Start menu, and `uninstall.cmd` in the install folder removes everything again. Options:
+`install.cmd -Dir D:\snap2midi -Gpu no -NoShortcut -Force`. Internet is needed to install,
+not to run.
 
 ## Development
 
@@ -42,6 +51,7 @@ py -3.11 -m venv .venv
 .venv\Scripts\python -m pip install -e ".[cuda,test]"
 .venv\Scripts\python -m pytest              # fast tests, ~20 s
 .venv\Scripts\python -m pytest -m e2e       # real engines, ~5 min on GPU
+.venv\Scripts\snap2midi gui                # run the app from source
 .venv\Scripts\python packaging\make_installer.py
 ```
 
@@ -58,3 +68,7 @@ install keeps their license texts in its `licenses` folder.
 ## License
 
 snap2midi is MIT licensed (see [LICENSE](LICENSE)). The third-party software it installs keeps its own licenses.
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for what is done, what is next and the open decisions.

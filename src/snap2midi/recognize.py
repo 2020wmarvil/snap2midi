@@ -11,6 +11,7 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -165,6 +166,8 @@ class HomrEngine(Engine):
 def find_audiveris() -> Path | None:
     candidates = [
         os.environ.get("SNAP2MIDI_AUDIVERIS"),
+        # An installed copy: <install>\python\python.exe and <install>\audiveris\Audiveris.exe
+        Path(sys.executable).resolve().parent.parent / "audiveris" / "Audiveris.exe",
         Path(__file__).resolve().parents[2] / "vendor" / "audiveris" / "Audiveris.exe",
         r"C:\Program Files\Audiveris\Audiveris.exe",
         shutil.which("Audiveris"),

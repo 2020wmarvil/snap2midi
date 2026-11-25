@@ -18,11 +18,15 @@
 
 .PARAMETER Force
   Replace an existing install.
+
+.PARAMETER NoShortcut
+  Do not add a snap2midi entry to the Start menu.
 #>
 param(
     [string]$Dir = (Join-Path $env:LOCALAPPDATA "Programs\snap2midi"),
     [ValidateSet("auto", "yes", "no")][string]$Gpu = "auto",
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoShortcut
 )
 
 $ErrorActionPreference = "Stop"
@@ -176,6 +180,29 @@ set "PYTHONHOME="
 exit /b %ERRORLEVEL%
 "@
 Set-Content -Path (Join-Path $Stage "snap2midi.cmd") -Value $launcher -Encoding ASCII
+$guiLauncher = @"
+@echo off
+rem Opens the snap2midi desktop app (no console window).
+set "SNAP2MIDI_AUDIVERIS=%~dp0audiveris\Audiveris.exe"
+set "PYTHONPATH="
+set "PYTHONHOME="
+start "" "%~dp0python\pythonw.exe" -X utf8 -m snap2midi.gui %*
+"@
+Set-Content -Path (Join-Path $Stage "snap2midi-gui.cmd") -Value $guiLauncher -Encoding ASCII
+$shortcutPath = Join-Path ([Environment]::GetFolderPath("Programs")) "snap2midi.lnk"
+$uninstall = @"
+@echo off
+rem Removes snap2midi: this folder and its Start menu entry.
+echo This removes %~dp0 and the snap2midi Start menu entry.
+choice /m "Continue"
+if errorlevel 2 exit /b 1
+del "$shortcutPath" 2>nul
+cd /d "%TEMP%"
+rem Wait for this script to exit before deleting its folder (ping works even when
+rem input is redirected, unlike timeout).
+start "" /b cmd /c ""%SystemRoot%\System32\PING.EXE" -n 3 127.0.0.1 >nul & rd /s /q "%~dp0""
+"@
+Set-Content -Path (Join-Path $Stage "uninstall.cmd") -Value $uninstall -Encoding ASCII
 Copy-Item (Join-Path $Here "SKILL.md") $Stage
 $lic = Join-Path $Stage "licenses"
 New-Item -ItemType Directory $lic | Out-Null
@@ -193,14 +220,29 @@ Copy-Item (Join-Path $PyDir "LICENSE.txt") (Join-Path $lic "Python-LICENSE.txt")
 # ------------------------------------------------------------------ 7. Check and finish
 Step "Self-check"
 $env:SNAP2MIDI_AUDIVERIS = Join-Path $Stage "audiveris\Audiveris.exe"
-$check = "import snap2midi.cli, homr, music21; from snap2midi.recognize import cuda_gpu_count, find_audiveris; " +
+$check = "import snap2midi.cli, homr, music21, verovio, resvg_py, snap2midi.gui.app; " +
+         "from snap2midi.recognize import cuda_gpu_count, find_audiveris; " +
          "assert find_audiveris(), 'Audiveris missing'; print('  GPUs usable:', cuda_gpu_count())"
 Invoke-Checked "self-check" { & $Py -X utf8 -c $check }
 
 if (Test-Path $Dir) { Remove-Item -Recurse -Force $Dir }
 Move-Item $Stage $Dir
+if (-not $NoShortcut) {
+    # Points at pythonw.exe directly so no console window opens; the app finds
+    # Audiveris next to its own Python.
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($shortcutPath)
+    $lnk.TargetPath = Join-Path $Dir "python\pythonw.exe"
+    $lnk.Arguments = "-X utf8 -m snap2midi.gui"
+    $lnk.WorkingDirectory = $Dir
+    $lnk.Description = "snap2midi: sheet music screenshots to MIDI"
+    $lnk.Save()
+    Write-Host "Start menu: snap2midi"
+}
 $size = (Get-ChildItem $Dir -Recurse -File | Measure-Object Length -Sum).Sum / 1GB
 Write-Host ""
 Write-Host ("Installed snap2midi to {0} ({1:N2} GB)" -f $Dir, $size) -ForegroundColor Green
-Write-Host "Run:   `"$Dir\snap2midi.cmd`" transcribe shot1.png shot2.png"
+Write-Host "App:   `"$Dir\snap2midi-gui.cmd`""
+Write-Host "CLI:   `"$Dir\snap2midi.cmd`" transcribe shot1.png shot2.png"
+Write-Host "Remove: `"$Dir\uninstall.cmd`""
 Write-Host "Agent skill: $Dir\SKILL.md"
