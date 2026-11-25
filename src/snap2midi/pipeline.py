@@ -14,9 +14,11 @@ import numpy as np
 
 from . import preprocess, stitch
 from music21 import bar
+from PIL import Image
 
 from .merge import export, merge
-from .recognize import AudiverisEngine, HomrEngine, pack_pages
+from .events import Emitter, Listener
+from .recognize import AudiverisEngine, Cancelled, HomrEngine, pack_pages
 
 
 class TranscribeError(Exception):
@@ -31,6 +33,7 @@ EXIT_USAGE = 2
 EXIT_NO_MUSIC = 3
 EXIT_RECOGNITION_FAILED = 4
 EXIT_ENGINE_MISSING = 5
+EXIT_CANCELLED = 6
 
 
 @dataclass
@@ -138,8 +141,19 @@ def write_review(suspects, systems, review_dir: Path) -> Path:
 
 def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path("."),
                use_audiveris: bool = True, gpu: bool | None = None,
-               workdir: Path | None = None, review: bool = True, log=lambda msg: None) -> Result:
+               workdir: Path | None = None, review: bool = True, log=lambda msg: None,
+               on_event: Listener | None = None, should_stop=None) -> Result:
+    """Run the whole pipeline. on_event receives progress events (see events.py);
+    should_stop() is polled between steps; when it returns True the run stops with
+    EXIT_CANCELLED."""
     t0 = time.time()
+    emit = Emitter(on_event)
+    stop = should_stop or (lambda: False)
+
+    def check_stop():
+        if stop():
+            raise TranscribeError(EXIT_CANCELLED, "cancelled")
+
     logging.getLogger("RapidOCR").setLevel(logging.ERROR)
     missing = [str(p) for p in images if not Path(p).is_file()]
     if missing:
@@ -157,13 +171,33 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
         aud = None
 
     log(f"Preprocessing {len(images)} screenshot(s)")
-    try:
-        pages = [preprocess.analyze(p) for p in images]
-    except Exception as e:  # noqa: BLE001
-        raise TranscribeError(EXIT_USAGE, f"could not read image: {e}") from e
+    pages = []
+    for k, path in enumerate(images):
+        check_stop()
+        try:
+            page = preprocess.analyze(path)
+        except Exception as e:  # noqa: BLE001
+            raise TranscribeError(EXIT_USAGE, f"could not read image {path}: {e}") from e
+        pages.append(page)
+        if emit.active:
+            emit("preprocess", "page", index=k, total=len(images), source=page.source, path=str(path),
+                 original=Image.open(path).convert("RGB"), clean=Image.fromarray(page.clean),
+                 staves=[(st.lines, st.x0, st.x1) for st in page.staves],
+                 systems=[{"box": sy.box, "barlines": sy.barlines, "partial": sy.partial}
+                          for sy in page.systems],
+                 warnings=page.warnings)
+
+    check_stop()
     log("Stitching")
     st = stitch.stitch(pages)
     warnings += st.warnings
+    if emit.active:
+        kept = {(sy.source, sy.index): n for sy, n in zip(st.systems, st.numbers)}
+        emit("stitch", "done", warnings=st.warnings, dropped=st.dropped,
+             systems=[{"source": sy.source, "index": sy.index, "kept": (sy.source, sy.index) in kept,
+                       "number": kept.get((sy.source, sy.index)), "measures": sy.measure_count,
+                       "image": sy.image}
+                      for page in pages for sy in page.systems])
     if not st.systems:
         raise TranscribeError(EXIT_NO_MUSIC, "no piano staves found in the screenshots")
 
@@ -171,6 +205,7 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
         name = read_title(pages[0]) or Path(images[0]).stem
         log(f"Name: {name}")
     name = safe_name(name)
+    emit("name", "done", name=name)
 
     tmp = None
     if workdir is None:
@@ -179,26 +214,52 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
     try:
         packed = pack_pages(st.systems, workdir / "pages")
         page_paths = [p.path for p in packed]
+        if emit.active:
+            for k, pk in enumerate(packed):
+                emit("pack", "page", index=k, total=len(packed), image=Image.open(pk.path).copy(),
+                     systems=pk.systems)
+
+        def progress_for(engine):
+            return lambda k, total, ok: emit("recognize", "page", engine=engine, index=k, total=total, ok=ok)
 
         aud_result: dict = {}
+        th = None
         if aud is not None:
             def run_aud():
+                emit("recognize", "start", engine="audiveris", pages=len(page_paths))
                 try:
-                    aud_result["out"] = aud.recognize(page_paths, workdir / "audiveris")
+                    out = aud.recognize(page_paths, workdir / "audiveris",
+                                        progress=progress_for("audiveris"), should_stop=stop)
+                    aud_result["out"] = out
+                    emit("recognize", "done", engine="audiveris", total=len(page_paths),
+                         ok_pages=sum(1 for o in out if o))
+                except Cancelled:
+                    aud_result["cancelled"] = True
                 except Exception as e:  # noqa: BLE001
                     aud_result["error"] = str(e)
             th = threading.Thread(target=run_aud, daemon=True)
             th.start()
         log(f"Recognizing {len(page_paths)} page(s)")
-        homr_out = homr.recognize(page_paths, workdir / "homr")
+        homr.prepare()
+        emit("recognize", "start", engine="homr", pages=len(page_paths), gpu=homr.using_gpu)
+        try:
+            homr_out = homr.recognize(page_paths, workdir / "homr", progress=progress_for("homr"),
+                                      should_stop=stop)
+        except Cancelled:
+            if th is not None:
+                th.join()
+            raise TranscribeError(EXIT_CANCELLED, "cancelled")
+        emit("recognize", "done", engine="homr", total=len(page_paths),
+             ok_pages=sum(1 for o in homr_out if o))
         if not any(homr_out):
             raise TranscribeError(EXIT_RECOGNITION_FAILED, "recognition failed on every page")
         aud_out = None
-        if aud is not None:
+        if th is not None:
             th.join()
+            check_stop()
             if "error" in aud_result:
                 warnings.append(f"Audiveris failed ({aud_result['error']}): no cross-check")
-            else:
+            elif "out" in aud_result:
                 aud_out = aud_result["out"]
 
         log("Merging and cross-checking")
@@ -225,15 +286,20 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
             warnings.append("could not expand the repeats; the MIDI plays the music as written once")
         review_dir = (write_review(mr.suspects, st.systems, Path(out_dir) / f"{name}.review")
                       if review and mr.suspects else None)
+        suspects = [{k: v for k, v in asdict(s).items() if v not in (None, [])} for s in mr.suspects]
+        emit("merge", "done", measures=mr.measures, fixes=mr.fixes, suspects=suspects,
+             warnings=warnings, system_counts=mr.system_counts)
+        emit("export", "done", musicxml=str(xml.resolve()), midi=str(mid.resolve()),
+             review_dir=str(review_dir.resolve()) if review_dir else None)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    return Result(
+    result = Result(
         name=name, musicxml=str(xml.resolve()), midi=str(mid.resolve()),
         measures=mr.measures, systems=len(st.systems), screenshots=len(images),
         duplicates_skipped=st.dropped,
-        suspect_measures=[{k: v for k, v in asdict(s).items() if v not in (None, [])} for s in mr.suspects],
+        suspect_measures=suspects,
         review_dir=str(review_dir.resolve()) if review_dir else None,
         midi_repeats_played=bool(has_repeats and expanded),
         printed_last_measure=printed_last,
@@ -242,3 +308,5 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
                  "audiveris": {"used": aud_out is not None}},
         seconds=round(time.time() - t0, 1),
     )
+    emit("done", "result", result=result.to_dict())
+    return result

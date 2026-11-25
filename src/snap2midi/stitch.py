@@ -30,6 +30,7 @@ class StitchResult:
     numbers: list[int | None]      # printed measure number at each system start
     warnings: list[str] = field(default_factory=list)
     dropped: int = 0               # systems removed as overlap or duplicates
+    dropped_systems: list[tuple[str, int]] = field(default_factory=list)  # (screenshot, index)
 
 
 # ---------------------------------------------------------------- measure numbers
@@ -142,7 +143,10 @@ def stitch(pages: list[Page], read_numbers: bool = True) -> StitchResult:
             for j in range(overlap):
                 i = len(out.systems) - overlap + j
                 if out.systems[i].partial and not new[j][0].partial:
-                    out.systems[i] = new[j][0]
+                    loser, out.systems[i] = out.systems[i], new[j][0]
+                else:
+                    loser = new[j][0]
+                out.dropped_systems.append((loser.source, loser.index))
                 if out.numbers[i] is None:
                     out.numbers[i] = new[j][1]
             out.dropped += overlap

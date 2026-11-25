@@ -11,6 +11,7 @@ import io
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,6 +50,10 @@ def pack_pages(systems: list[System], workdir: Path, per_page: int = SYSTEMS_PER
 
 class EngineMissing(RuntimeError):
     pass
+
+
+class Cancelled(Exception):
+    """The caller asked the transcription to stop."""
 
 
 class Engine:
@@ -117,17 +122,26 @@ class HomrEngine(Engine):
         self.using_gpu = use_gpu
         self._ready = True
 
+    def prepare(self) -> None:
+        """Pick GPU or CPU and make sure the models are present."""
+        if not self._ready:
+            self._setup()
+
     def _run(self, local: Path) -> Path:
         from homr.main import process_image
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             return Path(process_image(str(local), self.config, self.xml_args))
 
-    def recognize(self, images, outdir):
+    def recognize(self, images, outdir, progress=None, should_stop=None):
+        """progress(index, total, ok) after each page; should_stop() is checked
+        before each page (raise Cancelled to stop)."""
         if not self._ready:
             self._setup()
         outdir.mkdir(parents=True, exist_ok=True)
         results = []
-        for img in images:
+        for k, img in enumerate(images):
+            if should_stop and should_stop():
+                raise Cancelled()
             local = outdir / img.name
             shutil.copy2(img, local)
             try:
@@ -135,14 +149,16 @@ class HomrEngine(Engine):
             except Exception:
                 if not self.using_gpu:
                     results.append(None)
-                    continue
-                # A GPU that is present but unusable (driver, memory): finish on the CPU.
-                self._setup(use_gpu=False)
-                self.gpu_failed = True
-                try:
-                    results.append(self._run(local))
-                except Exception:
-                    results.append(None)
+                else:
+                    # A GPU that is present but unusable (driver, memory): finish on the CPU.
+                    self._setup(use_gpu=False)
+                    self.gpu_failed = True
+                    try:
+                        results.append(self._run(local))
+                    except Exception:
+                        results.append(None)
+            if progress:
+                progress(k, len(images), results[-1] is not None)
         return results
 
 
@@ -168,14 +184,38 @@ class AudiverisEngine(Engine):
     def available(self) -> bool:
         return self.exe is not None
 
-    def recognize(self, images, outdir):
+    def recognize(self, images, outdir, progress=None, should_stop=None):
+        """One Audiveris process for all pages. Progress is reported as each
+        page's output file appears; should_stop() kills the process."""
         if not self.exe:
             raise EngineMissing("Audiveris not found")
         outdir.mkdir(parents=True, exist_ok=True)
-        subprocess.run([str(self.exe), "-batch", "-export", "-output", str(outdir), *map(str, images)],
-                       capture_output=True, text=True, timeout=300 + 120 * len(images))
-        results = []
-        for img in images:
+
+        def output_of(img):
             hits = sorted(outdir.glob(img.stem + "*.mxl")) + sorted(outdir.glob(img.stem + "*.musicxml"))
-            results.append(hits[0] if hits else None)
-        return results
+            return hits[0] if hits else None
+
+        proc = subprocess.Popen([str(self.exe), "-batch", "-export", "-output", str(outdir), *map(str, images)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 300 + 120 * len(images)
+        reported: set[int] = set()
+        try:
+            while True:
+                done = proc.poll() is not None
+                for k, img in enumerate(images):
+                    if k not in reported and (output_of(img) or done):
+                        reported.add(k)
+                        if progress:
+                            progress(k, len(images), output_of(img) is not None)
+                if done:
+                    break
+                if should_stop and should_stop():
+                    raise Cancelled()
+                if time.time() > deadline:
+                    break
+                time.sleep(0.25)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        return [output_of(img) for img in images]
