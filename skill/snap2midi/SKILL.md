@@ -65,6 +65,13 @@ Success (example from a short piece; your values will differ):
   ],
   "review_dir": "C:\\...\\Hollow Knight Main Theme.review",
   "midi_repeats_played": false,
+  "structure": {
+    "play_order": "1-26",
+    "measures_played": 26,
+    "repeats": [],
+    "endings": [],
+    "markings": []
+  },
   "warnings": [],
   "fixes": ["system 1, treble staff shifted up an octave (octave clef)"],
   "engines": {"homr": {"gpu": true}, "audiveris": {"used": true}},
@@ -85,6 +92,25 @@ How to read a suspect measure:
 - `measure_image`: an enlarged crop of just that measure. `image`: the whole line of music
   around it. `measure_image` is absent when the barlines could not be matched; then use
   `image` and count measures from the left.
+
+`structure` says in which order the MIDI plays the measures. For a score with repeats and
+a D.S. it looks like this (measure numbers as in the output file):
+
+```json
+"structure": {
+  "play_order": "1-5, 1-4, 6-10, 3-4, 6, 11-14",
+  "measures_played": 21,
+  "repeats": [{"measure": 1, "sign": "start"}, {"measure": 5, "sign": "end"}],
+  "endings": [{"measure": 5, "numbers": [1]}, {"measure": 6, "numbers": [2]}],
+  "markings": [{"kind": "segno", "measure": 3, "text": "Bravura"},
+               {"kind": "to_coda", "measure": 6, "text": "To Coda"},
+               {"kind": "ds_al_coda", "measure": 10, "text": "D.S. al Coda"},
+               {"kind": "coda", "measure": 11, "text": "Leland"}]
+}
+```
+
+The MusicXML keeps the score as printed (repeat signs, endings and markings included); the
+MIDI follows `play_order`.
 
 Failure: `{"ok": false, "exit_code": 3, "error": "no piano staves found in the screenshots"}`
 
@@ -124,7 +150,12 @@ There is no other ground truth. So after every successful run:
    Say plainly which measures in the files are wrong (the "Audiveris right" and "unclear"
    cases). If every suspect is "homr right", say that the files need no correction and
    list the checks briefly. Do not edit the output files unless the user asks.
-4. If you cannot view images, say so and list the suspect measures with both readings
+4. **Check the play order.** If the score has repeat signs, 1st/2nd endings, D.C., D.S.,
+   Fine or a Coda, compare `structure.play_order` with what the score asks for. Look for
+   markings the tool missed (they are read from the page by OCR and sign matching) and
+   for any structure warning. If the order is wrong, tell the user which measures the MIDI
+   plays in the wrong order; the MusicXML is unaffected.
+5. If you cannot view images, say so and list the suspect measures with both readings
    for the user to check by eye or by ear.
 
 Known tendencies, useful as a prior but never a substitute for looking:
@@ -148,12 +179,19 @@ Known tendencies, useful as a prior but never a substitute for looking:
   - `... duplicate of previous screenshot, skipped`: harmless.
   - `Audiveris not found ...`: no cross-check was done, so `suspect_measures` only covers
     bar-length and range problems.
+  - `1st/2nd ending seen by only one engine at measure(s) ...; not applied`: check the score;
+    if there really is an ending there, the MIDI plays the wrong pass.
+  - `the score says D.S. but no segno sign was found`, `... al Coda but no coda sign ...`,
+    `no To Coda point was found`: a jump was read but its target was not; the MIDI then jumps
+    to the start or plays on. Check `play_order` against the score.
 - `fixes`: automatic corrections already applied. Informational.
 
 ## Limits
 
 - Piano scores only (two staves). Lead sheets and other instruments are not supported.
 - Printed, engraved music. Handwritten scores will fail or be poor.
-- Repeats: the MusicXML keeps the repeat signs as printed; the MIDI plays repeated
-  sections out (`midi_repeats_played: true`), so it is longer than the printed score.
-  1st/2nd endings, D.C. and D.S. are not handled; a warning says so when they may matter.
+- Repeats, 1st/2nd endings, D.C., D.S., Fine and Coda are followed in the MIDI
+  (`midi_repeats_played: true`, order in `structure.play_order`). After a D.C. or D.S.,
+  repeats are not taken again and the last ending is played, the usual convention.
+  Unusual instructions ("D.C. con repetizione", multiple codas, written-out text
+  directions) are not understood.

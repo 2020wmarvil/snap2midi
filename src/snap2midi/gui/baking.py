@@ -365,6 +365,18 @@ class BakingView(QScrollArea):
             lab = QLabel(f"<span style='color:#9a6700'>warning:</span> {w}")
             lab.setWordWrap(True)
             self.merge_box.addWidget(lab)
+        st = d.get("structure") or {}
+        if st.get("play_order"):
+            names = {"dc": "D.C.", "dc_al_fine": "D.C. al Fine", "dc_al_coda": "D.C. al Coda", "ds": "D.S.",
+                     "ds_al_fine": "D.S. al Fine", "ds_al_coda": "D.S. al Coda", "fine": "Fine",
+                     "to_coda": "To Coda", "coda": "Coda", "segno": "segno"}
+            bits = [f"repeat {r['sign']} at m. {r['measure']}" for r in st.get("repeats", [])]
+            bits += [f"ending {'/'.join(map(str, e['numbers']))} at m. {e['measure']}" for e in st.get("endings", [])]
+            bits += [f"{names.get(m['kind'], m['kind'])} at m. {m['measure']}" for m in st.get("markings", [])]
+            lab = QLabel(f"<b>Play order</b> (MIDI): {st['play_order']}"
+                         + (f"<br><span style='color:#57606a'>{'; '.join(bits)}</span>" if bits else ""))
+            lab.setWordWrap(True)
+            self.merge_box.addWidget(lab)
         self._suspects = d["suspects"]
         if not d["suspects"]:
             self.merge_box.addWidget(QLabel("The engines agree on every measure."))

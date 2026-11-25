@@ -13,6 +13,11 @@ import numpy as np
 from PIL import Image
 
 TARGET_INTERLINE = 20  # px between staff lines after normalization
+# Pixels darker than this are ink. Thin staff lines on small or anti-aliased
+# renderings come out light gray, so this sits well above mid-gray.
+INK = 180
+# Staff lines are first looked for at this stricter cutoff (see find_staves).
+STAFF_INK = 140
 
 
 @dataclass
@@ -133,8 +138,8 @@ def _staff_extent(dark: np.ndarray, lines) -> tuple[int, int]:
     return (int(cols[0]), int(cols[-1])) if len(cols) else (0, dark.shape[1] - 1)
 
 
-def find_staves(gray: np.ndarray) -> list[Staff]:
-    dark = gray < 140
+def _find_staves_at(gray: np.ndarray, ink: int) -> list[Staff]:
+    dark = gray < ink
     # Staff lines can be broken by stems, clefs and barlines, so allow gaps:
     # close small horizontal gaps before measuring runs.
     closed = dark.copy()
@@ -153,6 +158,19 @@ def find_staves(gray: np.ndarray) -> list[Staff]:
         else:
             i += 1
     return staves
+
+
+def find_staves(gray: np.ndarray) -> list[Staff]:
+    """Staves at the strict ink cutoff; the lenient one only when it finds more.
+
+    The strict cutoff is what the engines were tuned and tested against: the
+    system crops follow the staff positions, and the engines' readings can
+    change with a one-pixel shift of the crop. Faint, anti-aliased staff lines
+    (small renderings, some engravers) need the lenient cutoff to be seen at all.
+    """
+    strict = _find_staves_at(gray, STAFF_INK)
+    lenient = _find_staves_at(gray, INK)
+    return lenient if len(lenient) > len(strict) else strict
 
 
 def pair_systems(staves: list[Staff]) -> tuple[list[tuple[Staff, Staff]], list[str]]:
@@ -187,7 +205,7 @@ def find_barlines(gray: np.ndarray, treble: Staff, bass: Staff) -> list[int]:
     treble staff to the bottom line of the bass staff; stems and note heads do
     not, so this needs no knowledge of the music.
     Double and repeat barlines count once."""
-    dark = gray < 140
+    dark = gray < INK
     x0, x1 = min(treble.x0, bass.x0), max(treble.x1, bass.x1)
     il = (treble.interline + bass.interline) / 2
 
@@ -196,7 +214,7 @@ def find_barlines(gray: np.ndarray, treble: Staff, bass: Staff) -> list[int]:
         return band.mean(axis=0) >= 0.9
 
     # Piano barlines also run through the gap between the staves; stems do not.
-    gap = dark[treble.bottom + 1:bass.top, x0:x1 + 1].mean(axis=0) >= 0.9
+    gap = dark[treble.bottom + 1:bass.top, x0:x1 + 1].mean(axis=0) >= 0.6  # text can cross it
     cols = np.where(covered(treble) & covered(bass) & gap)[0] + x0
     lines: list[list[int]] = []
     for c in cols:
@@ -204,6 +222,16 @@ def find_barlines(gray: np.ndarray, treble: Staff, bass: Staff) -> list[int]:
             lines[-1].append(int(c))
         else:
             lines.append([int(c)])
+    # Barline groups closer than two staff spaces are one boundary (for example an
+    # end-repeat, a double bar and a start-repeat drawn side by side): no measure
+    # is that narrow.
+    merged: list[list[int]] = []
+    for l in lines:
+        if merged and l[0] - merged[-1][-1] < 2 * il:
+            merged[-1].extend(l)
+        else:
+            merged.append(list(l))
+    lines = merged
     xs = [round((l[0] + l[-1]) / 2) for l in lines]
     thick = [l[-1] - l[0] + 1 >= 0.3 * il for l in lines]
     # The system's opening line sits at the staff start; add it if it was not drawn.

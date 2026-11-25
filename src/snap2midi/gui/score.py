@@ -39,10 +39,15 @@ def engrave(musicxml: str | Path) -> tuple[list[Image.Image], list[MeasureBox]]:
     import resvg_py
     import verovio
 
-    tk = verovio.toolkit()
-    tk.setOptions({"pageWidth": 2100, "pageHeight": 2970, "scale": 40, "adjustPageHeight": True,
-                   "header": "none", "footer": "none", "svgBoundingBoxes": True})
-    if not tk.loadFile(str(musicxml)):
+    # Two toolkits with the same layout: one draws the page, the other adds
+    # bounding boxes, used only to locate measures. resvg misplaces every text
+    # element (words, measure numbers, labels) when bounding boxes are present.
+    layout = {"pageWidth": 2100, "pageHeight": 2970, "scale": 40, "adjustPageHeight": True,
+              "header": "none", "footer": "none"}
+    tk, tk_boxes = verovio.toolkit(), verovio.toolkit()
+    tk.setOptions(layout)
+    tk_boxes.setOptions({**layout, "svgBoundingBoxes": True})
+    if not (tk.loadFile(str(musicxml)) and tk_boxes.loadFile(str(musicxml))):
         raise ValueError(f"Verovio could not read {musicxml}")
     pages, boxes = [], []
     for page_no in range(1, tk.getPageCount() + 1):
@@ -52,7 +57,7 @@ def engrave(musicxml: str | Path) -> tuple[list[Image.Image], list[MeasureBox]]:
         page = Image.new("RGB", rgba.size, "white")
         page.paste(rgba, mask=rgba.getchannel("A"))  # resvg leaves the background transparent
         pages.append(page)
-        boxes += _measure_boxes(svg, page_no - 1, tk)
+        boxes += _measure_boxes(tk_boxes.renderToSVG(page_no), page_no - 1, tk_boxes)
     # Files without measure numbers (or with duplicates) get them by position.
     if len({b.number for b in boxes}) != len(boxes) or any(b.number <= 0 for b in boxes):
         for k, b in enumerate(boxes, 1):

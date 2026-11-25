@@ -16,6 +16,8 @@ from pathlib import Path
 
 from music21 import bar, clef, converter, instrument, key, layout, meter, spanner, stream
 
+from .structure import Marks, play_order
+
 warnings.filterwarnings("ignore", module="music21")
 
 
@@ -24,6 +26,7 @@ class Measure:
     staves: list[stream.Measure]   # [treble, bass]
     system: int                    # index into the stitched system list
     page_start: bool = False
+    endings: tuple[int, ...] = ()  # 1st/2nd ending numbers this engine put on the measure
 
 
 @dataclass
@@ -57,6 +60,8 @@ class MergeResult:
     warnings: list[str] = field(default_factory=list)
     fixes: list[str] = field(default_factory=list)
     system_counts: dict[int, int] = field(default_factory=dict)  # system index -> measures recognized
+    play_order: list[int] = field(default_factory=list)  # 0-based measure indices as performed
+    structure: dict = field(default_factory=dict)        # what was found, for reporting
 
 
 # ---------------------------------------------------------------- loading
@@ -73,7 +78,16 @@ def load_pages(paths: list[Path | None], page_systems: list[list[int]]) -> tuple
         except Exception as e:  # noqa: BLE001
             warns.append(f"page {p + 1}: unreadable output ({e})")
             continue
-        endings += len(list(s.recurse().getElementsByClass(spanner.RepeatBracket)))
+        brackets = list(s.recurse().getElementsByClass(spanner.RepeatBracket))
+        endings += len(brackets)
+        ending_of: dict[int, tuple[int, ...]] = {}
+        for rb in brackets:
+            try:
+                nums = tuple(int(x) for x in (rb.numberRange or []))
+            except (TypeError, ValueError):
+                continue
+            for el in rb.getSpannedElements():
+                ending_of[id(el)] = nums
         parts = list(s.parts)
         if len(parts) < 2:
             warns.append(f"page {p + 1}: expected 2 staves, got {len(parts)}")
@@ -84,7 +98,8 @@ def load_pages(paths: list[Path | None], page_systems: list[list[int]]) -> tuple
         for i in range(n):
             if i > 0 and any(sl.isNew for sl in ms[0][i].getElementsByClass(layout.SystemLayout)):
                 sys_i += 1
-            out.append(Measure([ms[0][i], ms[1][i]], systems[min(sys_i, len(systems) - 1)], i == 0))
+            out.append(Measure([ms[0][i], ms[1][i]], systems[min(sys_i, len(systems) - 1)], i == 0,
+                               ending_of.get(id(ms[0][i])) or ending_of.get(id(ms[1][i])) or ()))
         if sys_i + 1 != len(systems):
             warns.append(f"page {p + 1}: engine saw {sys_i + 1} systems, expected {len(systems)}")
     return Piece(out, endings=endings), warns
@@ -269,6 +284,139 @@ def copy_repeats(primary: Piece, other: Piece, pairs) -> int:
     return n
 
 
+def agree_endings(primary: Piece, other: Piece, pairs) -> list[str]:
+    """Keep a 1st/2nd ending only where both engines put one on the same measure.
+    Audiveris reports ending brackets that are not there (long slurs, pedal
+    brackets); homr has not, so a homr-only ending is still reported."""
+    warns = []
+    matched = {i: j for i, j in pairs if i is not None and j is not None}
+    one_sided = []
+    for i, m in enumerate(primary.measures):
+        j = matched.get(i)
+        theirs = other.measures[j].endings if j is not None else ()
+        if m.endings and theirs and set(m.endings) & set(theirs):
+            continue
+        if m.endings:
+            one_sided.append(i + 1)
+            m.endings = ()
+    if one_sided:
+        warns.append(f"1st/2nd ending seen by only one engine at measure(s) "
+                     f"{', '.join(map(str, one_sided))}; not applied")
+    return warns
+
+
+def structure_marks(piece: Piece, located: list) -> tuple[list[Marks], list[dict]]:
+    """One Marks per measure: repeat signs and double bars from the barlines,
+    endings from the engines, and the words and signs found on the image
+    (marks.find_all), placed by system and position within the system."""
+    out = [Marks() for _ in piece.measures]
+    for i, m in enumerate(piece.measures):
+        st = m.staves[0]
+        if isinstance(st.leftBarline, bar.Repeat) and st.leftBarline.direction == "start":
+            out[i].repeat_start = True
+        rb = st.rightBarline
+        if isinstance(rb, bar.Repeat) and rb.direction == "end":
+            out[i].repeat_end = True
+        elif rb is not None and getattr(rb, "type", None) in ("double", "final", "light-light", "light-heavy"):
+            out[i].section_end = True
+        out[i].endings = tuple(m.endings)
+    by_system: dict[int, list[int]] = {}
+    for i, m in enumerate(piece.measures):
+        by_system.setdefault(m.system, []).append(i)
+    placed = []
+    for loc in located:
+        members = by_system.get(loc.system - 1)
+        if not members:
+            continue
+        i = members[min(loc.position, len(members)) - 1]
+        mk = out[i]
+        if loc.kind == "segno":
+            mk.segno = True
+        elif loc.kind == "coda":
+            mk.coda = True
+        elif loc.kind == "to_coda":
+            mk.to_coda = True
+        elif loc.kind == "fine":
+            mk.fine = True
+        elif loc.kind.startswith(("dc", "ds")):
+            mk.jump = loc.kind
+        else:
+            continue
+        mk.notes.append(loc.text)
+        placed.append({"kind": loc.kind, "measure": i + 1, "text": loc.text})
+    return out, placed
+
+
+JUMP_TEXT = {"dc": "D.C.", "dc_al_fine": "D.C. al Fine", "dc_al_coda": "D.C. al Coda",
+             "ds": "D.S.", "ds_al_fine": "D.S. al Fine", "ds_al_coda": "D.S. al Coda"}
+
+
+def annotate_structure(score: stream.Score, marks: list[Marks]) -> None:
+    """Write the endings and the jump markings into the MusicXML, so the score
+    reads like the original (the MIDI follows them through play_order)."""
+    from music21 import expressions, repeat
+    parts = list(score.parts)
+    if not parts:
+        return
+    ms = [list(p.getElementsByClass(stream.Measure)) for p in parts]
+    # Endings: one bracket per run of consecutive measures with the same numbers.
+    k = 0
+    while k < len(marks):
+        nums = marks[k].endings
+        if not nums:
+            k += 1
+            continue
+        run = k
+        while run + 1 < len(marks) and marks[run + 1].endings == nums:
+            run += 1
+        for part_ms, part in zip(ms, parts):
+            rb = spanner.RepeatBracket(part_ms[k:run + 1], number=",".join(map(str, nums)))
+            part.insert(0, rb)
+        k = run + 1
+    top = ms[0]
+    for i, mk in enumerate(marks):
+        m = top[i]
+        last = max((float(n.offset) for n in m.notesAndRests), default=0.0)
+        if mk.segno:
+            m.insert(0, repeat.Segno())
+        if mk.coda:
+            m.insert(0, repeat.Coda())
+        if mk.to_coda:
+            m.insert(last, expressions.TextExpression("To Coda"))
+        if mk.fine:
+            m.insert(last, repeat.Fine())
+        if mk.jump:
+            m.insert(last, expressions.TextExpression(JUMP_TEXT[mk.jump]))
+
+
+def _ranges(order: list[int]) -> str:
+    """[0,1,2,3,0,1,4] -> '1-4, 1-2, 5' (1-based)."""
+    if not order:
+        return ""
+    parts, start, prev = [], order[0], order[0]
+    for x in order[1:] + [None]:
+        if x is not None and x == prev + 1:
+            prev = x
+            continue
+        parts.append(f"{start + 1}" if start == prev else f"{start + 1}-{prev + 1}")
+        if x is not None:
+            start = prev = x
+    return ", ".join(parts)
+
+
+def summarize_structure(marks: list[Marks], placed: list[dict], order: list[int]) -> dict:
+    endings = [{"measure": i + 1, "numbers": list(m.endings)} for i, m in enumerate(marks) if m.endings]
+    repeats = [{"measure": i + 1, "sign": "start" if m.repeat_start else "end"}
+               for i, m in enumerate(marks) if m.repeat_start or m.repeat_end]
+    return {
+        "play_order": _ranges(order),
+        "measures_played": len(order),
+        "repeats": repeats,
+        "endings": endings,
+        "markings": placed,
+    }
+
+
 def build_score(piece: Piece, title: str) -> stream.Score:
     sc = stream.Score()
     parts = [stream.PartStaff(id="P1-Staff1"), stream.PartStaff(id="P1-Staff2")]
@@ -363,7 +511,8 @@ def number_gaps(piece: Piece, printed: list[int | None]) -> list[str]:
 
 
 def merge(homr_out: list[Path | None], aud_out: list[Path | None] | None,
-          page_systems: list[list[int]], printed: list[int | None], title: str) -> MergeResult:
+          page_systems: list[list[int]], printed: list[int | None], title: str,
+          marks: list | None = None) -> MergeResult:
     primary, warns = load_pages(homr_out, page_systems)
     warns = [f"homr {w}" for w in warns]
     fixes, suspects = [], []
@@ -384,9 +533,8 @@ def merge(homr_out: list[Path | None], aud_out: list[Path | None] | None,
             primary.measures = keep
             pairs = align(primary.measures, other.measures)
         fixes += fix_octaves(primary, other, pairs)
-        if copy_repeats(primary, other, pairs) and other.endings:
-            warns.append("the score has repeats and possibly 1st/2nd endings; endings are not "
-                         "handled, so the MIDI may play both endings on every pass")
+        copy_repeats(primary, other, pairs)
+        warns += agree_endings(primary, other, pairs)
         for i, j in pairs:
             if i is None:
                 continue
@@ -419,9 +567,14 @@ def merge(homr_out: list[Path | None], aud_out: list[Path | None] | None,
     for s in final:
         _describe(s, primary, other if aud_out is not None else None, matched.get(s.measure - 1), printed)
 
+    struct_marks, located = structure_marks(primary, marks or [])
+    order, owarns = play_order(struct_marks)
+    warns += owarns
     score = build_score(primary, title)
+    annotate_structure(score, struct_marks)
     counts = dict(Counter(m.system for m in primary.measures))
-    return MergeResult(score, len(primary.measures), final, warns, fixes, counts)
+    summary = summarize_structure(struct_marks, located, order)
+    return MergeResult(score, len(primary.measures), final, warns, fixes, counts, order, summary)
 
 
 # ---------------------------------------------------------------- review detail
@@ -486,19 +639,38 @@ def _describe(s: Suspect, primary: Piece, other: Piece | None, j: int | None,
         s.only_audiveris = _diff(ea, eh, _names(other.measures[j]))
 
 
-def export(score: stream.Score, out_dir: Path, name: str) -> tuple[Path, Path, bool]:
+def expanded_score(score: stream.Score, order: list[int]) -> stream.Score:
+    """The score as performed: measures copied in play order and renumbered."""
+    out = stream.Score()
+    for part in score.parts:
+        ms = list(part.getElementsByClass(stream.Measure))
+        new = stream.PartStaff(id=part.id)
+        for num, i in enumerate(order, 1):
+            m = copy.deepcopy(ms[i])
+            m.number = num
+            m.leftBarline = None
+            m.rightBarline = None
+            new.append(m)
+        for inst in part.getElementsByClass(instrument.Instrument):
+            new.insert(0, copy.deepcopy(inst))
+        out.insert(0, new)
+    return out
+
+
+def export(score: stream.Score, out_dir: Path, name: str,
+           order: list[int] | None = None) -> tuple[Path, Path, bool]:
     out_dir.mkdir(parents=True, exist_ok=True)
     xml = out_dir / f"{name}.musicxml"
     mid = out_dir / f"{name}.mid"
     # The engines' output is already notated; music21's re-notation pass would
     # re-bar measures and can crash on multi-voice measures.
     score.write("musicxml", fp=str(xml), makeNotation=False)
-    # MIDI is what gets played along to, so repeats are played out; the
-    # MusicXML keeps the score as printed. One track per staff (hand).
-    expanded = True
-    try:
-        played = score.expandRepeats()
-    except Exception:  # noqa: BLE001  malformed repeat structure: play as written
-        played, expanded = score, False
+    # MIDI is what gets played along to, so it follows the play order (repeats,
+    # endings, D.C./D.S. jumps); the MusicXML keeps the score as printed.
+    # One track per staff (hand).
+    n = len(list(score.parts[0].getElementsByClass(stream.Measure))) if score.parts else 0
+    order = order if order else list(range(n))
+    expanded = order != list(range(n))
+    played = expanded_score(score, order) if expanded else score
     played.write("midi", fp=str(mid))
     return xml, mid, expanded

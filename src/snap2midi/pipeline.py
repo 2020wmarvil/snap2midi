@@ -18,6 +18,7 @@ from PIL import Image
 
 from .merge import export, merge
 from .events import Emitter, Listener
+from .marks import find_all
 from .recognize import AudiverisEngine, Cancelled, HomrEngine, pack_pages
 
 
@@ -52,6 +53,7 @@ class Result:
     seconds: float = 0.0
     review_dir: str | None = None
     midi_repeats_played: bool = False
+    structure: dict = field(default_factory=dict)
     printed_last_measure: int | None = None
 
     def to_dict(self) -> dict:
@@ -201,6 +203,18 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
     if not st.systems:
         raise TranscribeError(EXIT_NO_MUSIC, "no piano staves found in the screenshots")
 
+    # Play-order markings (D.C., D.S., Fine, Coda, segno) are searched on the
+    # system images while the engines run; neither engine reports them.
+    marks_result: dict = {}
+
+    def run_marks():
+        try:
+            marks_result["found"] = find_all(st.systems)
+        except Exception as e:  # noqa: BLE001
+            marks_result["error"] = f"{type(e).__name__}: {e}"
+    marks_thread = threading.Thread(target=run_marks, daemon=True)
+    marks_thread.start()
+
     if not name:
         name = read_title(pages[0]) or Path(images[0]).stem
         log(f"Name: {name}")
@@ -263,7 +277,12 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
                 aud_out = aud_result["out"]
 
         log("Merging and cross-checking")
-        mr = merge(homr_out, aud_out, [p.systems for p in packed], st.numbers, name)
+        marks_thread.join()
+        located, mwarns = marks_result.get("found", ([], []))
+        warnings += mwarns
+        if "error" in marks_result:
+            warnings.append(f"could not look for D.C./D.S./Coda markings ({marks_result['error']})")
+        mr = merge(homr_out, aud_out, [p.systems for p in packed], st.numbers, name, marks=located)
         warnings += mr.warnings
         printed_last = None
         last = st.systems[-1]
@@ -279,16 +298,12 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
                                 f"{s.measure_count}")
         if mr.measures == 0:
             raise TranscribeError(EXIT_RECOGNITION_FAILED, "no measures recognized")
-        xml, mid, expanded = export(mr.score, Path(out_dir), name)
-        has_repeats = any(isinstance(b, bar.Repeat) for m in mr.score.parts[0].getElementsByClass("Measure")
-                          for b in (m.leftBarline, m.rightBarline))
-        if has_repeats and not expanded:
-            warnings.append("could not expand the repeats; the MIDI plays the music as written once")
+        xml, mid, expanded = export(mr.score, Path(out_dir), name, mr.play_order)
         review_dir = (write_review(mr.suspects, st.systems, Path(out_dir) / f"{name}.review")
                       if review and mr.suspects else None)
         suspects = [{k: v for k, v in asdict(s).items() if v not in (None, [])} for s in mr.suspects]
         emit("merge", "done", measures=mr.measures, fixes=mr.fixes, suspects=suspects,
-             warnings=warnings, system_counts=mr.system_counts)
+             warnings=warnings, system_counts=mr.system_counts, structure=mr.structure)
         emit("export", "done", musicxml=str(xml.resolve()), midi=str(mid.resolve()),
              review_dir=str(review_dir.resolve()) if review_dir else None)
     finally:
@@ -301,7 +316,8 @@ def transcribe(images: list[Path], name: str | None = None, out_dir: Path = Path
         duplicates_skipped=st.dropped,
         suspect_measures=suspects,
         review_dir=str(review_dir.resolve()) if review_dir else None,
-        midi_repeats_played=bool(has_repeats and expanded),
+        midi_repeats_played=bool(expanded),
+        structure=mr.structure,
         printed_last_measure=printed_last,
         warnings=warnings, fixes=mr.fixes,
         engines={"homr": {"gpu": bool(getattr(homr, "using_gpu", False))},

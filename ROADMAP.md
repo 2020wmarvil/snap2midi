@@ -1,6 +1,6 @@
 # Roadmap
 
-Status as of 2026-11-25. Four phases, each ending at a gate the next one depends on.
+Status as of 2026-11-25 (updated after the repeat-structure work). Four phases, each ending at a gate the next one depends on.
 No dates are set.
 
 | Phase | Gate at the end | Status |
@@ -8,7 +8,7 @@ No dates are set.
 | 1. Harden the CLI | The "done means" criteria are met (output good enough to play along to without editing; suspect measures reported) | Done; real scrolled captures deferred |
 | 2. Installer | Runs on a clean PC, GPU or not | Built and tested on a clean CI runner; a second real PC is still untried |
 | 3. Desktop app | Produces the same files as the CLI | Done |
-| 4. Play-along handoff | The play-along app's needs are written down | Repeats done; the rest not started |
+| 4. Play-along handoff | The play-along app's needs are written down | Play order done (repeats, endings, D.C., D.S., Fine, Coda); agreeing the contract not started |
 
 ## 1. Harden the CLI
 
@@ -27,7 +27,7 @@ agent following SKILL.md).
 | --- | --- | --- |
 | Downloading installer | Runs on a PC with no Python, Java or CUDA installed; falls back to CPU without an NVIDIA GPU | Done: `install.cmd` downloads pinned, SHA-256-checked components; CUDA only with an NVIDIA GPU. Tested here (GPU 2.48 GB, CPU 0.92 GB before the app; CPU 1.14 GB with it) and on a clean GitHub runner. Not yet tried on a second real PC. |
 | Agent skill ships with the tool | An agent transcribes a folder using only the skill | Done: SKILL.md sits next to the launcher. An agent given only SKILL.md judged all 5 suspect measures of a test piece correctly; its feedback is folded in. |
-| CI | Every push shows a pass/fail check; a failing check blocks merging | CI runs on every push and pull request. Merge blocking needs branch protection, not yet turned on. |
+| CI | Every push shows a pass/fail check; a failing check blocks merging | Done: CI runs on every push and pull request; branch protection on `main` requires it for pull requests (admins can still push directly). |
 | Releases | A fresh install from a release zip passes | Done: a `v*` tag builds the installer package, installs it on a clean runner, checks the CLI, then publishes. A manual run does all but publishing. No release tagged yet. |
 
 ## 3. Desktop app
@@ -48,13 +48,14 @@ The play-along app itself is out of scope; this phase only settles what it needs
 | Two staves, one MIDI track per hand | Done |
 | Measure numbers matching the printed score | Done (`printed_last_measure` checks it) |
 | Repeats played out in the MIDI, kept as printed in the MusicXML | Done |
-| 1st/2nd endings, D.C., D.S. | Not handled; the CLI warns when a score may have them |
+| 1st/2nd endings, D.C., D.S., Fine, Coda | Done: endings where both engines agree; D.C./D.S./Fine/To Coda read by OCR and segno/coda signs matched on the page (only searched where the words call for them). The MIDI follows the computed play order; the MusicXML shows the markings; `structure.play_order` in the JSON. Tested on generated pieces and a public-domain Mutopia engraving (tests/fixtures/structure). |
 | Agree the contract with the play-along app | Not started |
 
 ## Open decisions and next steps
 
-- [ ] Handle 1st/2nd endings, D.C. and D.S. (Audiveris reports ending brackets that are not there, so this needs its own detection).
-- [ ] Turn on branch protection for `main` so failing CI blocks merging.
+- [x] Handle 1st/2nd endings, D.C., D.S., Fine and Coda.
+- [x] Branch protection for `main` (CI required for pull requests).
+- [ ] Find a real (not generated) score with D.S. al Coda for the test set; Mutopia has none for solo piano.
 - [ ] Tag the first release (`v0.1.0`).
 - [ ] Try the installer on a second Windows PC, with and without an NVIDIA GPU.
 - [ ] Add 2 or 3 real scrolled captures to the test set.
@@ -63,5 +64,5 @@ The play-along app itself is out of scope; this phase only settles what it needs
 ## Known limitations
 
 - Piano scores only (two staves), printed music only.
-- 1st/2nd endings, D.C. and D.S. are not expanded in the MIDI.
+- After a D.C. or D.S. the usual convention is assumed (repeats not taken again, last ending played); unusual instructions such as "D.C. con repetizione" are not understood.
 - Windows only (the installer, MIDI playback in the app and the GPU path).
