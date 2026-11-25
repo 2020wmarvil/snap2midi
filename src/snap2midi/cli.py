@@ -46,8 +46,13 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--cpu", action="store_true", help="do not use the GPU")
     t.add_argument("--no-review", action="store_true", help="do not write review images for suspect measures")
     t.add_argument("--keep-work", type=Path, help="keep intermediate pages and engine output in this folder")
+    g = sub.add_parser("gui", help="open the desktop app")
+    g.add_argument("files", nargs="*", help="screenshots to load, or a .musicxml to view")
     a = ap.parse_args(argv)
     _quiet()
+    if a.cmd == "gui":
+        from .gui import main as gui_main
+        return gui_main(["snap2midi", *a.files])
 
     from .pipeline import EXIT_OK, TranscribeError, transcribe
 

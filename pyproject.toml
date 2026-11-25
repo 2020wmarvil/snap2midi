@@ -13,6 +13,10 @@ dependencies = [
     "pillow",
     "rapidocr",
     "onnxruntime-gpu==1.32.0",
+    # Desktop app: Qt widgets, score engraving, SVG rasterizing.
+    "PySide6-Essentials>=6.8",
+    "verovio>=5",
+    "resvg_py>=0.5",
 ]
 
 [project.optional-dependencies]

@@ -185,17 +185,54 @@ def fix_octaves(primary: Piece, other: Piece, pairs) -> list[str]:
                 shifted = Counter({(o, p + sh): c for (o, p), c in pa.items()})
                 if shifted == pb and pa != pb:
                     by_sys_staff.setdefault((a.system, s), []).append(sh)
-    for (sys_i, s), shifts in by_sys_staff.items():
+    # Decide first, then change: the clef in effect must be read before any octave
+    # clef is inserted, or a later system would find the inserted one.
+    todo = []
+    for (sys_i, s), shifts in sorted(by_sys_staff.items()):
         members = [m for m in primary.measures if m.system == sys_i]
         with_notes = [m for m in members if _staff_events(m, s)]
-        sh = Counter(shifts).most_common(1)[0][0]
         if len(shifts) >= max(2, 0.6 * len(with_notes)):
-            for m in members:
-                for n in m.staves[s].recurse().notes:
-                    n.transpose(sh, inPlace=True)
-            fixes.append(f"system {sys_i + 1}, {'treble' if s == 0 else 'bass'} staff shifted "
-                         f"{'up' if sh > 0 else 'down'} an octave (octave clef)")
+            todo.append((sys_i, s, members, Counter(shifts).most_common(1)[0][0],
+                         _plain_clef(members[0].staves[s], s)))
+    fixed: dict[tuple[int, int], clef.Clef] = {}
+    for sys_i, s, members, sh, plain in todo:
+        fixed[(sys_i, s)] = plain
+        for m in members:
+            for n in m.staves[s].recurse().notes:
+                n.transpose(sh, inPlace=True)
+        _set_octave_clef(members[0].staves[s], s, sh)
+        fixes.append(f"system {sys_i + 1}, {'treble' if s == 0 else 'bass'} staff shifted "
+                     f"{'up' if sh > 0 else 'down'} an octave (octave clef)")
+    # Where the octave clef ends, the next system goes back to the plain clef.
+    for (sys_i, s), plain in fixed.items():
+        if (sys_i + 1, s) in fixed:
+            continue
+        nxt = next((m for m in primary.measures if m.system == sys_i + 1), None)
+        if nxt is not None and not nxt.staves[s].getElementsByClass(clef.Clef):
+            nxt.staves[s].insert(0, plain)
     return fixes
+
+
+def _plain_clef(staff: stream.Measure, s: int) -> clef.Clef:
+    """The clef in effect at this measure, without any octave marking."""
+    c = staff.getContextByClass(clef.Clef)
+    if c is None:
+        return clef.TrebleClef() if s == 0 else clef.BassClef()
+    if c.octaveChange:
+        return clef.TrebleClef() if c.sign == "G" else clef.BassClef() if c.sign == "F" else copy.deepcopy(c)
+    return copy.deepcopy(c)
+
+
+def _set_octave_clef(staff: stream.Measure, s: int, shift: int) -> None:
+    """Show the octave clef the score prints, so the shifted notes are drawn
+    where the page has them instead of on a stack of ledger lines."""
+    for c in list(staff.getElementsByClass(clef.Clef)):
+        staff.remove(c)
+    if s == 0:
+        new = clef.Treble8vaClef() if shift > 0 else clef.Treble8vbClef()
+    else:
+        new = clef.Bass8vaClef() if shift > 0 else clef.Bass8vbClef()
+    staff.insert(0, new)
 
 
 def _staff_events(m: Measure, s: int) -> Counter:
